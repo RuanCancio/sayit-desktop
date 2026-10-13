@@ -5,6 +5,11 @@ import "./App.css";
 
 const DEFAULT_SHORTCUT = "Alt+Shift+S";
 
+export interface Message {
+  role: "user" | "assistant";
+  content: string;
+}
+
 function App() {
   const [prompt, setPrompt] = useState("");
   const [response, setResponse] = useState("Say something you want!");
@@ -16,6 +21,13 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [hasSavedKey, setHasSavedKey] = useState(false);
 
+  // Histórico de mensagens salvo no localStorage
+  const [messages, setMessages] = useState<Message[]>(() => {
+    const saved = localStorage.getItem("sayit_history");
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // Carrega configurações iniciais
   useEffect(() => {
     const savedKey = localStorage.getItem("sayit_api_key");
     const savedShortcut = localStorage.getItem("sayit_shortcut") || DEFAULT_SHORTCUT;
@@ -31,7 +43,18 @@ function App() {
     setShortcutInput(savedShortcut);
   }, []);
 
+  // Oculta a janela ao pressionar a tecla ESC
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        handleHideApp();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
+  // Configuração do Atalho Global
   useEffect(() => {
     let isMounted = true;
 
@@ -39,12 +62,10 @@ function App() {
       if (!shortcut.trim()) return;
 
       try {
-        // Remove qualquer registro prévio desse atalho
         await unregister(shortcut).catch(() => {});
 
         if (!isMounted) return;
 
-        // Registra o atalho no Tauri v2
         await register(shortcut, async (event) => {
           if (event.state === "Pressed") {
             const appWin = getCurrentWindow();
@@ -84,7 +105,6 @@ function App() {
     setIsSettingsOpen(false);
   };
 
-  // Oculta a janela sem matá-la
   const handleHideApp = async () => {
     try {
       await getCurrentWindow().hide();
@@ -93,9 +113,17 @@ function App() {
     }
   };
 
+  // Limpa a memória da conversa para iniciar um novo assunto
+  const handleClearHistory = () => {
+    setMessages([]);
+    localStorage.removeItem("sayit_history");
+    setResponse("Memória limpa! Nova conversa iniciada.");
+  };
+
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!prompt.trim()) return;
+    const userPrompt = prompt.trim();
+    if (!userPrompt || isLoading) return;
 
     if (!apiKey) {
       setResponse("Por favor, configure sua API Key primeiro.");
@@ -105,6 +133,25 @@ function App() {
 
     setIsLoading(true);
     setResponse("Pensando...");
+    setPrompt("");
+
+    // Adiciona a nova mensagem do usuário ao histórico atual
+    const updatedMessages: Message[] = [...messages, { role: "user", content: userPrompt }];
+
+    // Pega até as últimas 6 mensagens para manter o contexto sem estourar limites
+    const recentHistory = messages.slice(-6);
+    let contextPrompt = "";
+
+    if (recentHistory.length > 0) {
+      contextPrompt =
+        "Histórico da conversa recente:\n" +
+        recentHistory
+          .map((m) => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content}`)
+          .join("\n") +
+        `\n\nNova mensagem do usuário: ${userPrompt}`;
+    } else {
+      contextPrompt = userPrompt;
+    }
 
     try {
       const res = await fetch("https://sayit-backend-b0th.onrender.com/api/v1/prompt", {
@@ -113,14 +160,19 @@ function App() {
           "Content-Type": "application/json",
           "X-User-API-Key": apiKey,
         },
-        body: JSON.stringify({ prompt }),
+        body: JSON.stringify({ prompt: contextPrompt }),
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
-      setResponse(data.response || data.aiResponse || data.prompt || "Sem resposta");
-      setPrompt("");
+      const assistantText = data.response || data.aiResponse || data.prompt || "Sem resposta";
+      setResponse(assistantText);
+
+      // Salva no estado e no localStorage
+      const finalHistory: Message[] = [...updatedMessages, { role: "assistant", content: assistantText }];
+      setMessages(finalHistory);
+      localStorage.setItem("sayit_history", JSON.stringify(finalHistory));
     } catch (error) {
       console.error("Erro na requisição:", error);
       setResponse("Connection Error");
@@ -136,7 +188,7 @@ function App() {
           <button
             onClick={handleHideApp}
             className="absolute top-2 left-2 text-gray-400 hover:text-red-500 text-xs cursor-pointer font-bold"
-            title="Ocultar janela"
+            title="Ocultar janela (Esc)"
           >
             ✕
           </button>
@@ -191,20 +243,32 @@ function App() {
           <button
             onClick={handleHideApp}
             className="absolute top-2 left-2 text-gray-400 hover:text-red-500 text-xs cursor-pointer font-bold"
-            title="Ocultar janela"
+            title="Ocultar janela (Esc)"
           >
             ✕
           </button>
 
-          <button
-            onClick={() => setIsSettingsOpen(true)}
-            className="absolute top-2 right-2 text-gray-400 hover:text-gray-600 cursor-pointer text-xs"
-            title="Configurações"
-          >
-            ⚙️
-          </button>
+          <div className="absolute top-2 right-2 flex gap-1">
+            <button
+              onClick={handleClearHistory}
+              className="text-gray-400 hover:text-red-500 cursor-pointer text-xs p-0.5"
+              title="Nova conversa (Limpar memória)"
+            >
+              🧹
+            </button>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              className="text-gray-400 hover:text-gray-600 cursor-pointer text-xs p-0.5"
+              title="Configurações"
+            >
+              ⚙️
+            </button>
+          </div>
 
-          <p className="text-sm font-medium text-center mb-2 mt-3 px-2">{response}</p>
+          <p className="text-sm font-medium text-center mb-2 mt-4 px-2 max-h-[120px] overflow-y-auto">
+            {response}
+          </p>
+
           <form onSubmit={handleSubmit} className="flex gap-1 border-t border-gray-200 pt-2">
             <input
               type="text"
